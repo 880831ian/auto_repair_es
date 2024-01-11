@@ -42,6 +42,15 @@ kubectl port-forward svc/<svc 名稱> 9200:9200 -n <namespace 名稱>
 
 <br>
 
+4. 結束後，請記得關閉 port-forward
+
+```bash
+ps aux | grep 9200
+kill <找到的 PID>
+```
+
+<br>
+
 ## 狀態說明
 
 1. 若沒有切換到正確的 K8S Cluster 或 Namespace，會顯示以下錯誤訊息
