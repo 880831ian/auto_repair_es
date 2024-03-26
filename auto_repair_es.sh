@@ -6,6 +6,7 @@ GREEN="\033[1;32m"
 YELLOW="\033[1;33m"
 BLUE="\033[1;34m"
 WHITE="\033[0m"
+IP="127.0.0.1" # 請自行更換 IP
 
 echo -e "====================================================================\n
                       elasticsearch 自動修復工具
@@ -16,7 +17,7 @@ echo -e "====================================================================\n
 run_count=0 # 計算執行次數，每 10 次顯示一次分片健康度
 
 function health() {
-    health_color=$(curl -sX GET "http://127.0.0.1:9200/_cat/health" | awk '{print $4}')
+    health_color=$(curl -sX GET "http://${IP}:9200/_cat/health" | awk '{print $4}')
     case $health_color in
     green)
         color="${GREEN}"
@@ -31,16 +32,16 @@ function health() {
         health_color="🔴"
         ;;
     esac
-    health_percent=$(curl -sX GET "http://127.0.0.1:9200/_cat/health" | awk '{print $NF}')
+    health_percent=$(curl -sX GET "http://${IP}:9200/_cat/health" | awk '{print $NF}')
     echo -e "====================================================================\n
                 ${BLUE}分片健康度：${color}${health_color}${BLUE} / 正常分片百分比：${GREEN}${health_percent}${WHITE}\n
 ===================================================================="
 }
 
-info=$(curl -sXGET "http://127.0.0.1:9200/_cluster/allocation/explain")
+info=$(curl -sXGET "http://${IP}:9200/_cluster/allocation/explain")
 
 if [ $(echo $?) == "7" ]; then # 檢查連線是否成功
-    echo -e "${RED}連線失敗，請先檢查是否有 port-forward 到對應的 svc 上 (9200 port)${WHITE}"
+    echo -e "${RED}連線失敗，請先檢查是否有 port-forward 到對應的 svc 上 (9200 port)，或是設定對應的 IP${WHITE}"
     echo -e "${BLUE}執行指令：${YELLOW}kubectl port-forward svc/<svc 名稱> 9200:9200 -n <namespace 名稱>${WHITE}\n"
     echo -e "${RED}或是檢查是否切換到正確的 Cluster 上 (與 namespace 有關)${WHITE}"
     echo -e "${BLUE}執行指令：${YELLOW}kubectl config use-context <gke 名稱>${WHITE}"
@@ -48,9 +49,10 @@ if [ $(echo $?) == "7" ]; then # 檢查連線是否成功
 fi
 
 while [[ ! $info =~ "unable to find any unassigned shards to explain" ]]; do # 檢查是否有 unassigned shards，沒有的話就繼續執行
-    index=$(echo $info | jq -r .index)                                       # 取得 index 名稱
-    shard=$(echo $info | jq -r .shard)                                       # 取得 shard 數量
-    error_msg=$(echo $info | jq -r .allocate_explanation)                    # 取得錯誤訊息
+    info=$(curl -sXGET "http://${IP}:9200/_cluster/allocation/explain")
+    index=$(echo $info | jq -r .index)                    # 取得 index 名稱
+    shard=$(echo $info | jq -r .shard)                    # 取得 shard 數量
+    error_msg=$(echo $info | jq -r .allocate_explanation) # 取得錯誤訊息
 
     echo -e "\n${BLUE}Index: ${YELLOW}${index}${WHITE}"
     echo -e "${BLUE}Shard: ${YELLOW}${shard}${WHITE}"
@@ -70,14 +72,14 @@ while [[ ! $info =~ "unable to find any unassigned shards to explain" ]]; do # �
             }
         }
         "
-        exit
     fi
 
-    if [ "$error_msg" == "cannot allocate because a previous copy of the primary shard existed but can no longer be found on the nodes in the cluster" ]; then
+    if [ "$error_msg" == "cannot allocate because a previous copy of the primary shard existed but can no longer be found on the nodes in the cluster" ] ||
+        [ "$error_msg" == "cannot allocate because allocation is not permitted to any of the nodes" ]; then
         echo -e "${BLUE}錯誤原因 : ${YELLOW}主分片所在節點掉線 or 分片找不到可用節點${WHITE}"
         echo -e "${BLUE}解決辦法 : ${YELLOW}重新設定分片路由，讓分片可以分配到其他節點上${WHITE}"
 
-        response=$(curl -sXPUT "http://127.0.0.1:9200/${index}/_settings?flat_settings=true" -H 'Content-Type: application/json' -d'
+        response=$(curl -sXPUT "http://${IP}:9200/${index}/_settings?flat_settings=true" -H 'Content-Type: application/json' -d'
         {
             "index.routing.allocation.require._name": null
         }' | jq)
@@ -89,7 +91,6 @@ while [[ ! $info =~ "unable to find any unassigned shards to explain" ]]; do # �
             echo -e "${BLUE}執行狀態 : ${RED}失敗${WHITE}\n"
             echo $response
         fi
-        exit
     fi
 
     if [ "$error_msg" == "cannot allocate because all found copies of the shard are either stale or corrupt" ] ||
@@ -106,7 +107,7 @@ while [[ ! $info =~ "unable to find any unassigned shards to explain" ]]; do # �
         echo -e "${BLUE}錯誤原因 : ${YELLOW}節點長時間掉線後，再次加入群集，導致引入髒數據 or 同一節點上被分配同一主分片的副本 (節點掉線也會導致)${WHITE}"
         echo -e "${BLUE}解決辦法 : ${YELLOW}重新分配分片到其他節點上${WHITE}"
 
-        response=$(curl -sXPOST "http://127.0.0.1:9200/_cluster/reroute?retry_failed=true" -H 'Content-Type: application/json' -d"
+        response=$(curl -sXPOST "http://${IP}:9200/_cluster/reroute?retry_failed=true" -H 'Content-Type: application/json' -d"
         {
         \"commands\": [
             {
@@ -127,9 +128,7 @@ while [[ ! $info =~ "unable to find any unassigned shards to explain" ]]; do # �
             echo -e "${BLUE}執行狀態 : ${RED}失敗 (請檢查所有 Node 資源是否正常)${WHITE}"
             echo "$response"
         fi
-        exit
     fi
-    info=$(curl -sXGET "http://127.0.0.1:9200/_cluster/allocation/explain")
 
     # 每 10 次顯示一次分片健康度
     run_count=$((run_count + 1))
